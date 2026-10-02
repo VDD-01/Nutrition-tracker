@@ -1,0 +1,9 @@
+{
+  "model": "unsloth/Llama-3.2-3B",
+  "dataset_directory": "C:\\Users\\valla\\VD-Projects\\AIES2\\Nutrition tracker\\dataset",
+  "training_samples": 11901,
+  "validation_samples": 1323,
+  "epochs": 3,
+  "learning_rate": 0.0002,
+  "status": "completed"
+}
