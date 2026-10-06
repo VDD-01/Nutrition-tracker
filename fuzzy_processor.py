@@ -22,6 +22,67 @@ class FuzzyQuantityProcessor:
         "glass": 240.0, "glasses": 240.0,
     }
 
+    VOLUME_UNITS_ML = {
+        "ml": 1.0, "milliliter": 1.0, "milliliters": 1.0,
+        "l": 1000.0, "liter": 1000.0, "liters": 1000.0,
+        "cup": 240.0, "cups": 240.0,
+        "tbsp": 15.0, "tablespoon": 15.0, "tablespoons": 15.0,
+        "tsp": 5.0, "teaspoon": 5.0, "teaspoons": 5.0,
+        "glass": 240.0, "glasses": 240.0,
+    }
+
+    FOOD_DENSITY_CATEGORIES = {
+        "cooked_grains": {
+            "density_g_per_ml": 0.75,
+            "keywords": (
+                "rice", "pulao", "biryani", "poha", "upma", "quinoa",
+                "oats", "porridge", "khichdi",
+            ),
+        },
+        "leafy_salad": {
+            "density_g_per_ml": 0.25,
+            "keywords": (
+                "salad", "lettuce", "spinach", "greens", "cabbage",
+                "kale", "rocket", "arugula",
+            ),
+        },
+        "liquid": {
+            "density_g_per_ml": 1.0,
+            "keywords": (
+                "water", "milk", "juice", "tea", "coffee", "lassi",
+                "smoothie", "soup", "broth", "dal", "sambar", "rasam",
+            ),
+        },
+        "nuts_seeds": {
+            "density_g_per_ml": 0.55,
+            "keywords": (
+                "nuts", "almond", "almonds", "cashew", "cashews",
+                "peanut", "peanuts", "walnut", "walnuts", "seed", "seeds",
+            ),
+        },
+        "cut_fruit": {
+            "density_g_per_ml": 0.65,
+            "keywords": (
+                "fruit", "apple", "banana", "mango", "grapes", "berries",
+                "orange", "papaya", "melon",
+            ),
+        },
+        "cooked_vegetables": {
+            "density_g_per_ml": 0.55,
+            "keywords": (
+                "vegetable", "vegetables", "sabzi", "curry", "potato",
+                "beans", "peas", "carrot", "cauliflower", "broccoli",
+            ),
+        },
+        "dense_protein": {
+            "density_g_per_ml": 0.85,
+            "keywords": (
+                "paneer", "tofu", "chicken", "fish", "egg", "eggs",
+                "meat", "mutton", "beef", "pork",
+            ),
+        },
+    }
+
     WORD_NUMBERS = {
         "a": 1, "an": 1, "one": 1, "two": 2, "three": 3, "four": 4,
         "five": 5, "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10,
@@ -90,13 +151,23 @@ class FuzzyQuantityProcessor:
             qty = self.WORD_NUMBERS.get(qty_str, None)
             if qty is None:
                 qty = float(qty_str)
-            grams = qty * self.UNIT_CONVERSIONS[unit]
+            density_info = self._detect_food_density(text_lower)
+            if unit in self.VOLUME_UNITS_ML:
+                neutral_grams = qty * self.UNIT_CONVERSIONS[unit]
+                grams = neutral_grams * density_info["density_g_per_ml"]
+            else:
+                neutral_grams = None
+                grams = qty * self.UNIT_CONVERSIONS[unit]
             return {
                 "quantity": qty,
                 "unit": unit,
                 "grams": grams,
                 "scale": grams / 100.0,
                 "method": "crisp",
+                "food_category": density_info["category"],
+                "density_g_per_ml": density_info["density_g_per_ml"] if unit in self.VOLUME_UNITS_ML else None,
+                "matched_food_keyword": density_info["matched_keyword"],
+                "base_grams_before_density": neutral_grams,
                 "memberships": {},
             }
 
@@ -104,9 +175,15 @@ class FuzzyQuantityProcessor:
         size_mu = self._fuzzify_size(text_lower)
         container_mu = self._fuzzify_container(text_lower)
         multiplier = self._crisp_multiplier(text_lower)
+        has_container = any(v > 0 for v in container_mu.values())
+        has_size = max(size_mu.values()) > 0
+        if has_size and not has_container:
+            container_mu["portion"] = 1.0
 
-        if any(v > 0 for v in container_mu.values()) or max(size_mu.values()) > 0:
-            grams, aggregated = self._mamdani(size_mu, container_mu)
+        if has_container or has_size:
+            base_grams, aggregated = self._mamdani(size_mu, container_mu)
+            density_info = self._detect_food_density(text_lower)
+            grams = base_grams * density_info["density_g_per_ml"]
             grams *= multiplier
             return {
                 "quantity": round(grams, 2),
@@ -114,6 +191,10 @@ class FuzzyQuantityProcessor:
                 "grams": round(grams, 2),
                 "scale": round(grams / 100.0, 4),
                 "method": "mamdani",
+                "food_category": density_info["category"],
+                "density_g_per_ml": density_info["density_g_per_ml"],
+                "matched_food_keyword": density_info["matched_keyword"],
+                "base_grams_before_density": round(base_grams, 2),
                 "memberships": {
                     "size": size_mu,
                     "container": container_mu,
@@ -209,6 +290,22 @@ class FuzzyQuantityProcessor:
         if re.search(r"\btriple\b", text):
             return 3.0
         return 1.0
+
+    def _detect_food_density(self, text):
+        for category, config in self.FOOD_DENSITY_CATEGORIES.items():
+            for keyword in config["keywords"]:
+                if re.search(rf"\b{re.escape(keyword)}\b", text):
+                    return {
+                        "category": category,
+                        "density_g_per_ml": config["density_g_per_ml"],
+                        "matched_keyword": keyword,
+                    }
+
+        return {
+            "category": "generic",
+            "density_g_per_ml": 1.0,
+            "matched_keyword": None,
+        }
 
     # ----- Mamdani inference + centroid defuzzification -----
 
