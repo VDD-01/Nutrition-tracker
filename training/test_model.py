@@ -1,10 +1,15 @@
 import os
 import sys
 import re
+import warnings
 import torch
 from pathlib import Path
 from transformers import AutoTokenizer, AutoModelForCausalLM, BitsAndBytesConfig
+from transformers import logging as hf_logging
 from peft import PeftModel
+
+warnings.filterwarnings("ignore")
+hf_logging.set_verbosity_error()
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(BASE_DIR))
@@ -34,10 +39,12 @@ def load_model():
         device_map="auto",
         trust_remote_code=True,
     )
+    base_model.generation_config.max_length = None
 
     print("Loading fine-tuned LoRA adapter...")
     model = PeftModel.from_pretrained(base_model, ADAPTER_DIR)
     model.eval()
+    model.generation_config.max_length = None
 
     eot_id = tokenizer.convert_tokens_to_ids("<|eot_id|>")
     eos_ids = [tokenizer.eos_token_id]
