@@ -2,7 +2,7 @@ import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from rag_system import NutritionRAG
+from grag_system import NutritionGRAG
 from fuzzy_processor import FuzzyQuantityProcessor
 from inference.predict import NutritionLlama
 from config import OLLAMA_MODEL, OLLAMA_HOST
@@ -10,7 +10,7 @@ from config import OLLAMA_MODEL, OLLAMA_HOST
 
 class NutritionAnalyzer:
     def __init__(self):
-        self.rag = NutritionRAG()
+        self.grag = NutritionGRAG()
         self.fuzzy = FuzzyQuantityProcessor()
         self.llm = NutritionLlama(model_name=OLLAMA_MODEL, host=OLLAMA_HOST)
 
@@ -19,19 +19,20 @@ class NutritionAnalyzer:
 
         quantity_info = self.fuzzy.extract_quantity_info(corrected_description)
 
-        rag_matches = self.rag.search_similar_meals(corrected_description)
-        rag_nutrition = self.rag.get_weighted_nutrition(rag_matches) if rag_matches else None
+        grag_result = self.grag.query_graph(corrected_description)
 
         llm_nutrition = self.llm.predict(corrected_description)
 
-        if rag_nutrition:
+        if grag_result["found"]:
             nutrition = {
-                "carbohydrates": round(0.4 * rag_nutrition["carbohydrates"] + 0.6 * llm_nutrition["carbohydrates"], 2),
-                "protein": round(0.4 * rag_nutrition["protein"] + 0.6 * llm_nutrition["protein"], 2),
-                "fat": round(0.4 * rag_nutrition["fat"] + 0.6 * llm_nutrition["fat"], 2),
-                "calories": round(0.4 * rag_nutrition["calories"] + 0.6 * llm_nutrition["calories"], 2),
-                "source": "rag+llm",
-                "rag_matches": len(rag_matches),
+                "carbohydrates": round(0.4 * grag_result["carbohydrates"] + 0.6 * llm_nutrition["carbohydrates"], 2),
+                "protein": round(0.4 * grag_result["protein"] + 0.6 * llm_nutrition["protein"], 2),
+                "fat": round(0.4 * grag_result["fat"] + 0.6 * llm_nutrition["fat"], 2),
+                "calories": round(0.4 * grag_result["calories"] + 0.6 * llm_nutrition["calories"], 2),
+                "source": "grag+llm",
+                "rag_matches": len(grag_result["nodes_traversed"]),
+                "graph_paths": grag_result["graph_paths"],
+                "nodes_traversed": grag_result["nodes_traversed"],
                 "raw_output": llm_nutrition.get("raw_output", "")
             }
         else:
@@ -42,6 +43,8 @@ class NutritionAnalyzer:
                 "calories": llm_nutrition["calories"],
                 "source": "llm",
                 "rag_matches": 0,
+                "graph_paths": [],
+                "nodes_traversed": [],
                 "raw_output": llm_nutrition.get("raw_output", "")
             }
 

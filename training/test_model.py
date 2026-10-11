@@ -15,6 +15,7 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(BASE_DIR))
 
 from fuzzy_processor import FuzzyQuantityProcessor
+from grag_system import NutritionGRAG
 
 ADAPTER_DIR = str(BASE_DIR / "trained_models" / "llama_nutrition")
 BASE_MODEL = "unsloth/Llama-3.2-3B"
@@ -118,8 +119,9 @@ def predict(model, tokenizer, eos_ids, meal_description):
 
 def main():
     print("=" * 60)
-    print("FINE-TUNED NUTRITION MODEL - TEST")
+    print("GRAG + FINE-TUNED NUTRITION MODEL")
     print(f"Adapter: {ADAPTER_DIR}")
+    print("Formula: 0.4 GRAG + 0.6 LLM")
     print("=" * 60 + "\n")
 
     if not torch.cuda.is_available():
@@ -131,6 +133,7 @@ def main():
         print("Run training/train.py first.")
         sys.exit(1)
 
+    grag = NutritionGRAG()
     fuzzy = FuzzyQuantityProcessor()
     model, tokenizer, eos_ids = load_model()
 
@@ -158,34 +161,59 @@ def main():
             print("  Corrections     : " + ", ".join(f"{k} -> {v}" for k, v in corrections.items()))
 
         qty_info = fuzzy.extract_quantity_info(corrected_meal)
+        grag_result = grag.query_graph(corrected_meal)
 
-        print("\n--- Fuzzy Interpretation ---")
-        print(f"  Method          : {qty_info.get('method', 'default')}")
-        if qty_info.get("grams") is not None:
-            print(f"  Estimated mass  : {qty_info['grams']}g")
-        if qty_info.get("food_category"):
-            print(f"  Category        : {qty_info['food_category']}")
-        print(f"  Scale applied   : x{qty_info['scale']}")
+        print("\n--- GRAG Knowledge Graph ---")
+        if grag_result["found"]:
+            print("  Nodes visited   : " + ", ".join(grag_result["nodes_traversed"]))
+            for p in grag_result["graph_paths"]:
+                print(f"  Path            : {p}")
+            print(f"  GRAG Base (100g): C={grag_result['carbohydrates']}g, P={grag_result['protein']}g, F={grag_result['fat']}g, Cal={grag_result['calories']}kcal")
+        else:
+            print("  No direct graph node found (relying 100% on fine-tuned LLM)")
 
-        raw, base = predict(model, tokenizer, eos_ids, corrected_meal)
+        raw_llm, base_llm = predict(model, tokenizer, eos_ids, corrected_meal)
 
-        print("\n--- Model raw output (per 100g reference) ---")
-        print(raw)
+        print("\n--- Fine-Tuned LLaMA Raw Output ---")
+        print(raw_llm)
 
-        if base and all(v is not None for v in base.values()):
+        if base_llm and all(v is not None for v in base_llm.values()):
+            if grag_result["found"]:
+                fused = {
+                    "carbohydrates": round(0.4 * grag_result["carbohydrates"] + 0.6 * base_llm["carbohydrates"], 2),
+                    "protein": round(0.4 * grag_result["protein"] + 0.6 * base_llm["protein"], 2),
+                    "fat": round(0.4 * grag_result["fat"] + 0.6 * base_llm["fat"], 2),
+                    "calories": round(0.4 * grag_result["calories"] + 0.6 * base_llm["calories"], 2),
+                }
+                print("\n--- Fused Base (0.4 GRAG + 0.6 LLM) ---")
+                print(f"  Carbs:    {fused['carbohydrates']:.1f}g")
+                print(f"  Protein:  {fused['protein']:.1f}g")
+                print(f"  Fat:      {fused['fat']:.1f}g")
+                print(f"  Calories: {fused['calories']:.0f}kcal")
+            else:
+                fused = base_llm
+
+            print("\n--- Fuzzy Quantity Interpretation ---")
+            print(f"  Method          : {qty_info.get('method', 'default')}")
+            if qty_info.get("grams") is not None:
+                print(f"  Estimated mass  : {qty_info['grams']}g")
+            if qty_info.get("food_category"):
+                print(f"  Category        : {qty_info['food_category']}")
+            print(f"  Scale applied   : x{qty_info['scale']}")
+
             if qty_info["scale"] != 1.0:
-                scaled = fuzzy.scale_nutrition(base, qty_info["scale"])
-                print(f"\n--- Scaled result (x{qty_info['scale']}) ---")
+                scaled = fuzzy.scale_nutrition(fused, qty_info["scale"])
+                print(f"\n--- Final Scaled Result (x{qty_info['scale']}) ---")
                 print(f"  Carbs:    {scaled['carbohydrates']:.1f}g")
                 print(f"  Protein:  {scaled['protein']:.1f}g")
                 print(f"  Fat:      {scaled['fat']:.1f}g")
                 print(f"  Calories: {scaled['calories']:.0f}kcal")
             else:
-                print("\n--- Result (1.0x serving) ---")
-                print(f"  Carbs:    {base['carbohydrates']:.1f}g")
-                print(f"  Protein:  {base['protein']:.1f}g")
-                print(f"  Fat:      {base['fat']:.1f}g")
-                print(f"  Calories: {base['calories']:.0f}kcal")
+                print(f"\n--- Final Result (1.0x serving) ---")
+                print(f"  Carbs:    {fused['carbohydrates']:.1f}g")
+                print(f"  Protein:  {fused['protein']:.1f}g")
+                print(f"  Fat:      {fused['fat']:.1f}g")
+                print(f"  Calories: {fused['calories']:.0f}kcal")
         else:
             print("\n(Could not parse all values from output)")
 
