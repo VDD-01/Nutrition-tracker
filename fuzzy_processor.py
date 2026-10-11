@@ -1,14 +1,8 @@
+import difflib
 import re
 
 
 class FuzzyQuantityProcessor:
-    """
-    Hybrid quantity module:
-      - Crisp rules for measured amounts (250g, 2 cups, ...)
-      - Mamdani fuzzy inference for linguistic portions (small bowl, handful, ...)
-    Does not change model outputs; only returns a scale factor.
-    """
-
     UNIT_CONVERSIONS = {
         "g": 1.0, "gram": 1.0, "grams": 1.0,
         "kg": 1000.0, "kilogram": 1000.0, "kilograms": 1000.0,
@@ -36,7 +30,7 @@ class FuzzyQuantityProcessor:
             "density_g_per_ml": 0.75,
             "keywords": (
                 "rice", "pulao", "biryani", "poha", "upma", "quinoa",
-                "oats", "porridge", "khichdi",
+                "oats", "porridge", "khichdi", "cereal",
             ),
         },
         "leafy_salad": {
@@ -97,8 +91,6 @@ class FuzzyQuantityProcessor:
         "xlarge": (350.0, 450.0, 500.0),
     }
 
-    # Mamdani rules: (size_term or None, container_term, output_set, extra_fire)
-    # None size = "any / unspecified size"
     FUZZY_RULES = [
         ("small", "handful", "tiny"),
         (None, "handful", "tiny"),
@@ -123,6 +115,8 @@ class FuzzyQuantityProcessor:
         ("large", "cup", "large"),
         (None, "glass", "medium"),
         (None, "slice", "small"),
+        ("small", "slice", "tiny"),
+        ("large", "slice", "small"),
         (None, "piece", "small"),
     ]
 
@@ -138,10 +132,68 @@ class FuzzyQuantityProcessor:
         "piece": r"\bpieces?\b",
     }
 
+    COMMON_ENGLISH_WORDS = {
+        "i", "me", "my", "we", "our", "you", "he", "she", "it", "they",
+        "ate", "eat", "eats", "eating", "had", "have", "has", "having",
+        "drank", "drink", "drinks", "drinking", "took", "take", "takes",
+        "with", "and", "or", "in", "on", "at", "of", "for", "to", "from",
+        "a", "an", "the", "some", "any", "all", "more", "less",
+        "sized", "size", "about", "around", "just", "only",
+        "breakfast", "lunch", "dinner", "snack", "meal", "food",
+        "plain", "hot", "cold", "warm", "fresh"
+    }
+
+    FOOD_VOCABULARY = {
+        "gram", "grams", "kilogram", "kilograms", "ounce", "ounces", "pound", "pounds",
+        "milliliter", "milliliters", "liter", "liters", "cup", "cups", "tablespoon", "tablespoons",
+        "teaspoon", "teaspoons", "glass", "glasses", "handful", "handfuls", "slice", "slices",
+        "piece", "pieces", "portion", "portions", "serving", "servings", "bowl", "bowls", "plate", "plates",
+        "small", "medium", "large", "tiny", "big", "huge", "generous", "little", "normal", "regular",
+        "average", "half", "quarter", "double", "triple", "one", "two", "three", "four", "five",
+        "six", "seven", "eight", "nine", "ten",
+        "cereal", "rice", "oat", "oats", "oatmeal", "bread", "toast", "pasta", "noodle", "noodles",
+        "roti", "naan", "quinoa", "corn", "potato", "potatoes", "biryani", "pulao", "poha", "upma",
+        "khichdi", "porridge", "chicken", "breast", "beef", "steak", "pork", "mutton", "lamb", "fish",
+        "salmon", "tuna", "shrimp", "prawn", "paneer", "tofu", "egg", "eggs", "turkey", "bacon", "ham",
+        "sausage", "meat", "milk", "cheese", "butter", "yogurt", "curd", "cream", "whey", "ghee",
+        "dal", "lentils", "beans", "chickpeas", "peas", "almond", "almonds", "cashew", "cashews",
+        "peanut", "peanuts", "walnut", "walnuts", "seed", "seeds", "apple", "banana", "orange",
+        "mango", "grape", "grapes", "strawberry", "strawberries", "berry", "berries", "blueberry",
+        "blueberries", "avocado", "watermelon", "papaya", "lemon", "lime", "tomato", "tomatoes",
+        "onion", "onions", "garlic", "spinach", "lettuce", "salad", "broccoli", "cauliflower",
+        "carrot", "carrots", "cucumber", "cabbage", "pepper", "capsicum", "mushroom", "mushrooms",
+        "pizza", "burger", "sandwich", "soup", "broth", "curry", "sabzi", "smoothie", "juice",
+        "tea", "coffee", "chocolate", "oil", "olive", "sugar",
+        "grilled", "fried", "baked", "boiled", "roasted", "scrambled", "steamed", "poached", "cooked", "raw"
+    }
+
+    KNOWN_WORDS = COMMON_ENGLISH_WORDS | FOOD_VOCABULARY
+
+    def correct_spelling(self, text, cutoff=0.75):
+        words = text.split()
+        corrected_words = []
+        corrections = {}
+
+        for w in words:
+            clean = re.sub(r'[^a-zA-Z]', '', w).lower()
+            if len(clean) <= 2 or clean in self.KNOWN_WORDS:
+                corrected_words.append(w)
+                continue
+
+            matches = difflib.get_close_matches(clean, self.FOOD_VOCABULARY, n=1, cutoff=cutoff)
+            if matches and matches[0] != clean:
+                rep = matches[0]
+                corrections[clean] = rep
+                new_w = re.sub(re.escape(clean), rep, w, flags=re.IGNORECASE)
+                corrected_words.append(new_w)
+            else:
+                corrected_words.append(w)
+
+        return " ".join(corrected_words), corrections
+
     def extract_quantity_info(self, text):
         text_lower = text.lower()
 
-        # --- Crisp path: measured qty + unit (unchanged behaviour) ---
         unit_alt = "|".join(self.UNIT_CONVERSIONS.keys())
         word_alt = "|".join(self.WORD_NUMBERS.keys())
         pattern = rf"(\d+(?:\.\d+)?|\b(?:{word_alt})\b)\s*({unit_alt})\b"
@@ -171,7 +223,6 @@ class FuzzyQuantityProcessor:
                 "memberships": {},
             }
 
-        # --- Fuzzy path: linguistic portion ---
         size_mu = self._fuzzify_size(text_lower)
         container_mu = self._fuzzify_container(text_lower)
         multiplier = self._crisp_multiplier(text_lower)
@@ -226,10 +277,9 @@ class FuzzyQuantityProcessor:
         }
 
     def scale_nutrition(self, nutrition, scale):
-        """Multiply numeric model outputs. Leaves source/raw_output/rag_matches intact."""
         if scale == 1.0:
             return nutrition
-        skip_keys = {"raw_output", "source", "rag_matches", "quantity_info"}
+        skip_keys = {"raw_output", "source", "rag_matches", "quantity_info", "corrections", "interpreted_meal"}
         scaled = {}
         nutrient_keys = {"carbohydrates", "protein", "fat", "calories"}
         for k, v in nutrition.items():
@@ -242,8 +292,6 @@ class FuzzyQuantityProcessor:
                 scaled[k] = v
         return scaled
 
-    # ----- fuzzification -----
-
     @staticmethod
     def triangle(x, a, b, c):
         if x <= a or x >= c:
@@ -255,10 +303,6 @@ class FuzzyQuantityProcessor:
         return (c - x) / (c - b) if c != b else 1.0
 
     def _fuzzify_size(self, text):
-        """
-        Overlapping linguistic size. Detected word gets 1.0; neighbours get a small overlap
-        so this is actual fuzzy sets, not a one-hot label.
-        """
         mu = {"small": 0.0, "medium": 0.0, "large": 0.0}
         if re.search(r"\b(small|tiny|little)\b", text):
             mu.update({"small": 1.0, "medium": 0.25, "large": 0.0})
@@ -273,7 +317,6 @@ class FuzzyQuantityProcessor:
         for name, pat in self.CONTAINER_PATTERNS.items():
             if re.search(pat, text):
                 mu[name] = 1.0
-        # mild overlap: bowl ~ plate as serving vessels
         if mu["bowl"] == 1.0:
             mu["plate"] = max(mu["plate"], 0.15)
         if mu["plate"] == 1.0:
@@ -307,15 +350,12 @@ class FuzzyQuantityProcessor:
             "matched_keyword": None,
         }
 
-    # ----- Mamdani inference + centroid defuzzification -----
-
     def _mamdani(self, size_mu, container_mu, step=1.0):
         universe = [i * step for i in range(0, int(500 / step) + 1)]
         aggregated = [0.0] * len(universe)
 
         for size_term, container, out_set in self.FUZZY_RULES:
             if size_term is None:
-                # container-only rule: fire with container membership
                 fire = container_mu.get(container, 0.0)
             else:
                 fire = min(size_mu.get(size_term, 0.0), container_mu.get(container, 0.0))
@@ -325,16 +365,15 @@ class FuzzyQuantityProcessor:
             a, b, c = self.OUTPUT_SETS[out_set]
             for i, x in enumerate(universe):
                 clipped = min(self.triangle(x, a, b, c), fire)
-                aggregated[i] = max(aggregated[i], clipped)  # max aggregation
+                aggregated[i] = max(aggregated[i], clipped)
 
         num = sum(x * mu for x, mu in zip(universe, aggregated))
         den = sum(aggregated)
         if den == 0:
             grams = 100.0
         else:
-            grams = num / den  # centroid
+            grams = num / den
 
-        # compact membership snapshot for viva / debugging (every 50g)
         snapshot = {str(int(x)): round(aggregated[int(x / step)], 3)
                     for x in range(0, 501, 50)}
         return grams, snapshot

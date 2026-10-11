@@ -15,12 +15,14 @@ class NutritionAnalyzer:
         self.llm = NutritionLlama(model_name=OLLAMA_MODEL, host=OLLAMA_HOST)
 
     def analyze(self, meal_description):
-        quantity_info = self.fuzzy.extract_quantity_info(meal_description)
+        corrected_description, corrections = self.fuzzy.correct_spelling(meal_description)
 
-        rag_matches = self.rag.search_similar_meals(meal_description)
+        quantity_info = self.fuzzy.extract_quantity_info(corrected_description)
+
+        rag_matches = self.rag.search_similar_meals(corrected_description)
         rag_nutrition = self.rag.get_weighted_nutrition(rag_matches) if rag_matches else None
 
-        llm_nutrition = self.llm.predict(meal_description)
+        llm_nutrition = self.llm.predict(corrected_description)
 
         if rag_nutrition:
             nutrition = {
@@ -47,4 +49,6 @@ class NutritionAnalyzer:
             nutrition = self.fuzzy.scale_nutrition(nutrition, quantity_info["scale"])
 
         nutrition["quantity_info"] = quantity_info
+        nutrition["interpreted_meal"] = corrected_description
+        nutrition["corrections"] = corrections
         return nutrition

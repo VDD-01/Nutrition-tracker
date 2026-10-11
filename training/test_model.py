@@ -7,107 +7,13 @@ from transformers import AutoTokenizer, AutoModelForCausalLM, BitsAndBytesConfig
 from peft import PeftModel
 
 BASE_DIR = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(BASE_DIR))
+
+from fuzzy_processor import FuzzyQuantityProcessor
+
 ADAPTER_DIR = str(BASE_DIR / "trained_models" / "llama_nutrition")
 BASE_MODEL = "unsloth/Llama-3.2-3B"
 MAX_NEW_TOKENS = 100
-
-QUANTITY_MAP = [
-    (r'\bhalf\s+a\s+cup\b',                                         0.5,   "half a cup",           "~120ml"),
-    (r'\bquarter\s+a?\s*cup\b',                                     0.25,  "quarter cup",          "~60ml"),
-    (r'\ba\s+cup\b|\bone\s+cup\b',                                  1.0,   "1 cup",                "~240ml"),
-    (r'\btwo\s+cups?\b',                                            2.0,   "2 cups",               "~480ml"),
-    (r'\bthree\s+cups?\b',                                          3.0,   "3 cups",               "~720ml"),
-    (r'\ba\s+glass\b|\bone\s+glass\b',                              1.0,   "1 glass",              "~240ml"),
-
-    (r'\bsmall\s+(?:sized\s+)?bowl\b',                             1.5,   "small bowl",           "~150g"),
-    (r'\bmedium\s+(?:sized\s+)?bowl\b',                            2.5,   "medium bowl",          "~250g"),
-    (r'\blarge\s+(?:sized\s+)?bowl\b|\bbig\s+bowl\b',             3.5,   "large bowl",           "~350g"),
-    (r'\ba\s+bowl\b|\bone\s+bowl\b',                               2.0,   "bowl",                 "~200g"),
-
-    (r'\bsmall\s+(?:sized\s+)?plate\b',                            2.0,   "small plate",          "~200g"),
-    (r'\bmedium\s+(?:sized\s+)?plate\b',                           3.0,   "medium plate",         "~300g"),
-    (r'\blarge\s+(?:sized\s+)?plate\b|\bbig\s+plate\b',           4.0,   "large plate",          "~400g"),
-    (r'\ba\s+plate\b|\bone\s+plate\b',                             2.5,   "plate",                "~250g"),
-
-    (r'\bsmall\s+(?:sized\s+)?portion\b|\bsmall\s+serving\b',     0.75,  "small portion",        "~75g"),
-    (r'\bmedium\s+(?:sized\s+)?portion\b|\bmedium\s+serving\b',   1.0,   "medium portion",       "~100g"),
-    (r'\blarge\s+(?:sized\s+)?portion\b|\blarge\s+serving\b',     1.5,   "large portion",        "~150g"),
-
-    (r'\bhandful\b',                                               0.3,   "handful",              "~30g"),
-    (r'\bsmall\s+handful\b',                                       0.2,   "small handful",        "~20g"),
-    (r'\blarge\s+handful\b',                                       0.4,   "large handful",        "~40g"),
-
-    (r'\bslice\b|\bpiece\b',                                       0.8,   "1 slice/piece",        "~80g"),
-    (r'\b(\d+)\s+slices?\b|\b(\d+)\s+pieces?\b',                  None,  None,                   "N slices"),
-
-    (r'\b(\d+(?:\.\d+)?)\s+cups?\b',                              None,  None,                   "cup x N"),
-    (r'\b(\d+(?:\.\d+)?)\s*(?:tbsp|tablespoons?)\b',              None,  None,                   "tbsp x N"),
-    (r'\b(\d+(?:\.\d+)?)\s*(?:tsp|teaspoons?)\b',                 None,  None,                   "tsp x N"),
-    (r'\b(\d+(?:\.\d+)?)\s*(?:g|grams?)\b',                       None,  None,                   "g"),
-    (r'\b(\d+(?:\.\d+)?)\s*(?:ml|millilitres?|milliliters?)\b',   None,  None,                   "ml"),
-    (r'\b(\d+(?:\.\d+)?)\s*(?:oz|ounces?)\b',                     None,  None,                   "oz"),
-
-    (r'\bhalf\b',                                                  0.5,   "half",                 "0.5x serving"),
-    (r'\bquarter\b',                                               0.25,  "quarter",              "0.25x serving"),
-    (r'\bdouble\b',                                                2.0,   "double",               "2x serving"),
-    (r'\b(\d+)\b',                                                 None,  None,                   "N servings"),
-]
-
-UNIT_TO_SCALE = {
-    'cup': 240.0 / 100.0,
-    'tbsp': 15.0 / 100.0,
-    'tsp': 5.0 / 100.0,
-    'g': 1.0 / 100.0,
-    'ml': 1.0 / 100.0,
-    'oz': 28.35 / 100.0,
-}
-
-
-def extract_quantity(text):
-    t = text.lower()
-
-    for pattern, fixed_scale, label, unit_desc in QUANTITY_MAP:
-        match = re.search(pattern, t)
-        if not match:
-            continue
-
-        if fixed_scale is not None:
-            return {
-                "detected": match.group(0).strip(),
-                "label": label,
-                "unit_desc": unit_desc,
-                "scale": fixed_scale,
-                "ref_amount": f"model reference x {fixed_scale}"
-            }
-
-        numeric = float(match.group(1))
-
-        for unit_key, scale_per_unit in UNIT_TO_SCALE.items():
-            if unit_key in pattern:
-                scale = round(numeric * scale_per_unit, 4)
-                return {
-                    "detected": match.group(0).strip(),
-                    "label": f"{numeric} {unit_key}",
-                    "unit_desc": unit_desc,
-                    "scale": scale,
-                    "ref_amount": f"{numeric * (100 * scale_per_unit):.0f}g / 100g reference"
-                }
-
-        return {
-            "detected": match.group(0).strip(),
-            "label": f"x{numeric}",
-            "unit_desc": unit_desc,
-            "scale": numeric,
-            "ref_amount": f"model reference x {numeric}"
-        }
-
-    return {
-        "detected": "none",
-        "label": "1 serving",
-        "unit_desc": "model reference amount (approx 100g)",
-        "scale": 1.0,
-        "ref_amount": "model reference x 1.0"
-    }
 
 
 def load_model():
@@ -181,7 +87,6 @@ def parse_output(text):
 
 
 def predict(model, tokenizer, eos_ids, meal_description):
-    qty = extract_quantity(meal_description)
     prompt = build_prompt(meal_description)
     inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
 
@@ -200,14 +105,8 @@ def predict(model, tokenizer, eos_ids, meal_description):
         skip_special_tokens=True
     )
     generated = clean_output(generated)
-
     base_nutrients = parse_output(generated)
-
-    scaled_nutrients = None
-    if qty["scale"] != 1.0 and all(v is not None for v in base_nutrients.values()):
-        scaled_nutrients = {k: round(v * qty["scale"], 2) for k, v in base_nutrients.items()}
-
-    return generated, base_nutrients, scaled_nutrients, qty
+    return generated, base_nutrients
 
 
 def main():
@@ -225,6 +124,7 @@ def main():
         print("Run training/train.py first.")
         sys.exit(1)
 
+    fuzzy = FuzzyQuantityProcessor()
     model, tokenizer, eos_ids = load_model()
 
     print("Type a meal description and press Enter.")
@@ -242,26 +142,39 @@ def main():
         if meal.lower() in ("quit", "exit", "q"):
             break
 
-        raw, base, scaled, qty = predict(model, tokenizer, eos_ids, meal)
+        corrected_meal, corrections = fuzzy.correct_spelling(meal)
+
+        if corrections:
+            print("\n--- Typo Detected ---")
+            print(f"  Original input  : {meal}")
+            print(f"  Interpreted as  : {corrected_meal}")
+            print("  Corrections     : " + ", ".join(f"{k} -> {v}" for k, v in corrections.items()))
+
+        qty_info = fuzzy.extract_quantity_info(corrected_meal)
 
         print("\n--- Fuzzy Interpretation ---")
-        print(f"  Quantity detected : {qty['detected']}")
-        print(f"  Interpreted as    : {qty['label']} ({qty['unit_desc']})")
-        print(f"  Scale applied     : x{qty['scale']}")
-        print(f"  Reference amount  : {qty['ref_amount']}")
+        print(f"  Method          : {qty_info.get('method', 'default')}")
+        if qty_info.get("grams") is not None:
+            print(f"  Estimated mass  : {qty_info['grams']}g")
+        if qty_info.get("food_category"):
+            print(f"  Category        : {qty_info['food_category']}")
+        print(f"  Scale applied   : x{qty_info['scale']}")
 
-        print("\n--- Model raw output (per reference amount) ---")
+        raw, base = predict(model, tokenizer, eos_ids, corrected_meal)
+
+        print("\n--- Model raw output (per 100g reference) ---")
         print(raw)
 
         if base and all(v is not None for v in base.values()):
-            if scaled and qty["scale"] != 1.0:
-                print(f"\n--- Scaled result (x{qty['scale']}) ---")
+            if qty_info["scale"] != 1.0:
+                scaled = fuzzy.scale_nutrition(base, qty_info["scale"])
+                print(f"\n--- Scaled result (x{qty_info['scale']}) ---")
                 print(f"  Carbs:    {scaled['carbohydrates']:.1f}g")
                 print(f"  Protein:  {scaled['protein']:.1f}g")
                 print(f"  Fat:      {scaled['fat']:.1f}g")
                 print(f"  Calories: {scaled['calories']:.0f}kcal")
             else:
-                print("\n--- Result (no scaling applied) ---")
+                print("\n--- Result (1.0x serving) ---")
                 print(f"  Carbs:    {base['carbohydrates']:.1f}g")
                 print(f"  Protein:  {base['protein']:.1f}g")
                 print(f"  Fat:      {base['fat']:.1f}g")
