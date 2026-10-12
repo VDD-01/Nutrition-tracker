@@ -160,17 +160,22 @@ def main():
             print(f"  Interpreted as  : {corrected_meal}")
             print("  Corrections     : " + ", ".join(f"{k} -> {v}" for k, v in corrections.items()))
 
-        qty_info = fuzzy.extract_quantity_info(corrected_meal)
         grag_result = grag.query_graph(corrected_meal)
 
+        if not grag_result["found"]:
+            print("\n--- GRAG Knowledge Graph ---")
+            print("  Status          : Food item not found in database.")
+            print("  Notice          : Skipped LLM generation to prevent hallucination.")
+            print("\nResult: Food item not in the database. Please check your input.\n")
+            continue
+
+        qty_info = fuzzy.extract_quantity_info(corrected_meal)
+
         print("\n--- GRAG Knowledge Graph ---")
-        if grag_result["found"]:
-            print("  Nodes visited   : " + ", ".join(grag_result["nodes_traversed"]))
-            for p in grag_result["graph_paths"]:
-                print(f"  Path            : {p}")
-            print(f"  GRAG Base (100g): C={grag_result['carbohydrates']}g, P={grag_result['protein']}g, F={grag_result['fat']}g, Cal={grag_result['calories']}kcal")
-        else:
-            print("  No direct graph node found (relying 100% on fine-tuned LLM)")
+        print("  Nodes visited   : " + ", ".join(grag_result["nodes_traversed"]))
+        for p in grag_result["graph_paths"]:
+            print(f"  Path            : {p}")
+        print(f"  GRAG Base (100g): C={grag_result['carbohydrates']}g, P={grag_result['protein']}g, F={grag_result['fat']}g, Cal={grag_result['calories']}kcal")
 
         raw_llm, base_llm = predict(model, tokenizer, eos_ids, corrected_meal)
 

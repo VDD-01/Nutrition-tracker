@@ -21,32 +21,39 @@ class NutritionAnalyzer:
 
         grag_result = self.grag.query_graph(corrected_description)
 
-        llm_nutrition = self.llm.predict(corrected_description)
-
-        if grag_result["found"]:
-            nutrition = {
-                "carbohydrates": round(0.4 * grag_result["carbohydrates"] + 0.6 * llm_nutrition["carbohydrates"], 2),
-                "protein": round(0.4 * grag_result["protein"] + 0.6 * llm_nutrition["protein"], 2),
-                "fat": round(0.4 * grag_result["fat"] + 0.6 * llm_nutrition["fat"], 2),
-                "calories": round(0.4 * grag_result["calories"] + 0.6 * llm_nutrition["calories"], 2),
-                "source": "grag+llm",
-                "rag_matches": len(grag_result["nodes_traversed"]),
-                "graph_paths": grag_result["graph_paths"],
-                "nodes_traversed": grag_result["nodes_traversed"],
-                "raw_output": llm_nutrition.get("raw_output", "")
-            }
-        else:
-            nutrition = {
-                "carbohydrates": llm_nutrition["carbohydrates"],
-                "protein": llm_nutrition["protein"],
-                "fat": llm_nutrition["fat"],
-                "calories": llm_nutrition["calories"],
-                "source": "llm",
+        if not grag_result["found"]:
+            return {
+                "carbohydrates": 0.0,
+                "protein": 0.0,
+                "fat": 0.0,
+                "calories": 0.0,
+                "source": "not_found",
                 "rag_matches": 0,
                 "graph_paths": [],
                 "nodes_traversed": [],
-                "raw_output": llm_nutrition.get("raw_output", "")
+                "raw_output": "Food item not found in the database. Please check your input.",
+                "status": "not_found",
+                "message": "Food item not found in the database. Please check your input.",
+                "quantity_info": quantity_info,
+                "interpreted_meal": corrected_description,
+                "corrections": corrections,
             }
+
+        llm_nutrition = self.llm.predict(corrected_description)
+
+        nutrition = {
+            "carbohydrates": round(0.4 * grag_result["carbohydrates"] + 0.6 * llm_nutrition["carbohydrates"], 2),
+            "protein": round(0.4 * grag_result["protein"] + 0.6 * llm_nutrition["protein"], 2),
+            "fat": round(0.4 * grag_result["fat"] + 0.6 * llm_nutrition["fat"], 2),
+            "calories": round(0.4 * grag_result["calories"] + 0.6 * llm_nutrition["calories"], 2),
+            "source": "grag+llm",
+            "rag_matches": len(grag_result["nodes_traversed"]),
+            "graph_paths": grag_result["graph_paths"],
+            "nodes_traversed": grag_result["nodes_traversed"],
+            "raw_output": llm_nutrition.get("raw_output", ""),
+            "status": "success",
+            "message": "Food item analyzed successfully.",
+        }
 
         if quantity_info["scale"] != 1.0:
             nutrition = self.fuzzy.scale_nutrition(nutrition, quantity_info["scale"])

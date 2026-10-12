@@ -39,6 +39,8 @@ class NutritionResponse(BaseModel):
     calories: float
     source: str
     rag_matches: int
+    status: str = "success"
+    message: str = ""
 
 
 @app.get("/health")
@@ -61,6 +63,8 @@ def analyze_meal(request: MealRequest):
         calories=result["calories"],
         source=result["source"],
         rag_matches=result["rag_matches"],
+        status=result.get("status", "success"),
+        message=result.get("message", ""),
     )
 
 
