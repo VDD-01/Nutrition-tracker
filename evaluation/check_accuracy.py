@@ -13,10 +13,17 @@ warnings.filterwarnings("ignore")
 hf_logging.set_verbosity_error()
 
 BASE_DIR = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(BASE_DIR))
+
+from grag_system import NutritionGRAG
+
 ADAPTER_DIR = str(BASE_DIR / "trained_models" / "llama_nutrition")
 BASE_MODEL = "unsloth/Llama-3.2-3B"
 OUTPUT_FILE = str(BASE_DIR / "evaluation_results_lora.json")
 MAX_NEW_TOKENS = 100
+
+GRAG_WEIGHT = 0.5
+LLM_WEIGHT = 0.5
 
 BENCHMARK_DATA = [
     {"meal": "chicken breast, grilled", "carb": 0.0, "protein": 31.02, "fat": 3.57, "energy": 165.0},
@@ -92,7 +99,21 @@ def parse_output(text):
     }
 
 
-def predict(model, tokenizer, eos_ids, meal_description):
+def atwater_calories(carb, protein, fat):
+    return round(4.0 * carb + 4.0 * protein + 9.0 * fat, 2)
+
+
+def apply_atwater(nutrients):
+    corrected = dict(nutrients)
+    corrected["calories"] = atwater_calories(
+        nutrients["carbohydrates"],
+        nutrients["protein"],
+        nutrients["fat"]
+    )
+    return corrected
+
+
+def predict_llm(model, tokenizer, eos_ids, meal_description):
     prompt = build_prompt(meal_description)
     inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
 
@@ -100,8 +121,7 @@ def predict(model, tokenizer, eos_ids, meal_description):
         output_ids = model.generate(
             **inputs,
             max_new_tokens=MAX_NEW_TOKENS,
-            temperature=0.1,
-            do_sample=True,
+            do_sample=False,
             pad_token_id=tokenizer.eos_token_id,
             eos_token_id=eos_ids,
         )
@@ -112,6 +132,27 @@ def predict(model, tokenizer, eos_ids, meal_description):
     ).strip()
 
     return parse_output(generated), generated
+
+
+def fuse_and_correct(grag_result, llm_pred):
+    if grag_result["found"] and all(v is not None for v in llm_pred.values()):
+        fused = {
+            "carbohydrates": round(GRAG_WEIGHT * grag_result["carbohydrates"] + LLM_WEIGHT * llm_pred["carbohydrates"], 2),
+            "protein": round(GRAG_WEIGHT * grag_result["protein"] + LLM_WEIGHT * llm_pred["protein"], 2),
+            "fat": round(GRAG_WEIGHT * grag_result["fat"] + LLM_WEIGHT * llm_pred["fat"], 2),
+            "calories": 0.0,
+            "source": "grag+llm",
+        }
+        fused["calories"] = atwater_calories(fused["carbohydrates"], fused["protein"], fused["fat"])
+        return fused
+
+    if all(v is not None for v in llm_pred.values()):
+        corrected = dict(llm_pred)
+        corrected["calories"] = atwater_calories(llm_pred["carbohydrates"], llm_pred["protein"], llm_pred["fat"])
+        corrected["source"] = "llm+atwater"
+        return corrected
+
+    return None
 
 
 def compute_sample_accuracy(predicted, actual):
@@ -136,9 +177,11 @@ def compute_sample_accuracy(predicted, actual):
 
 def main():
     print("=" * 80)
-    print("LORA FINE-TUNED MODEL ACCURACY BENCHMARK")
-    print(f"Adapter: {ADAPTER_DIR}")
-    print(f"Test samples: {len(BENCHMARK_DATA)}")
+    print("GRAG + LORA FINE-TUNED MODEL ACCURACY BENCHMARK")
+    print(f"Pipeline : {GRAG_WEIGHT} GRAG + {LLM_WEIGHT} LLM + Atwater Energy Correction")
+    print(f"Adapter  : {ADAPTER_DIR}")
+    print(f"Decoding : Deterministic (greedy, do_sample=False)")
+    print(f"Samples  : {len(BENCHMARK_DATA)}")
     print("=" * 80 + "\n")
 
     if not torch.cuda.is_available():
@@ -149,6 +192,7 @@ def main():
         print(f"ERROR: Model adapter not found at {ADAPTER_DIR}")
         sys.exit(1)
 
+    grag = NutritionGRAG()
     model, tokenizer, eos_ids = load_model()
 
     results = []
@@ -156,36 +200,52 @@ def main():
     total_acc = 0.0
     valid_predictions = 0
 
-    print(f"{'Meal':<35} | {'Actual (C/P/F/Kcal)':<24} | {'Pred (C/P/F/Kcal)':<24} | {'Acc':<6}")
-    print("-" * 96)
+    print(f"{'Meal':<35} | {'Actual (C/P/F/Kcal)':<24} | {'Fused (C/P/F/Kcal)':<24} | {'Acc':<7} | Source")
+    print("-" * 110)
 
     for item in BENCHMARK_DATA:
         meal = item["meal"]
-        pred, raw_text = predict(model, tokenizer, eos_ids, meal)
+
+        grag_result = grag.query_graph(meal)
+        llm_pred, raw_text = predict_llm(model, tokenizer, eos_ids, meal)
+
+        final = fuse_and_correct(grag_result, llm_pred)
 
         act_str = f"{item['carb']:.1f}/{item['protein']:.1f}/{item['fat']:.1f}/{item['energy']:.0f}"
 
-        if None in pred.values():
+        if final is None:
             pred_str = "PARSE ERROR"
             sample_acc = 0.0
             abs_err = {"carb": item['carb'], "protein": item['protein'], "fat": item['fat'], "energy": item['energy']}
+            source_label = "error"
         else:
             valid_predictions += 1
-            pred_str = f"{pred['carbohydrates']:.1f}/{pred['protein']:.1f}/{pred['fat']:.1f}/{pred['calories']:.0f}"
-            abs_err, sample_acc = compute_sample_accuracy(pred, item)
+            pred_str = f"{final['carbohydrates']:.1f}/{final['protein']:.1f}/{final['fat']:.1f}/{final['calories']:.0f}"
+            abs_err, sample_acc = compute_sample_accuracy(final, item)
+            source_label = final.get("source", "unknown")
             for k in total_mae:
                 total_mae[k] += abs_err[k]
             total_acc += sample_acc
 
-        print(f"{meal:<35} | {act_str:<24} | {pred_str:<24} | {sample_acc:.1f}%")
+        print(f"{meal:<35} | {act_str:<24} | {pred_str:<24} | {sample_acc:<6.1f}% | {source_label}")
+
+        grag_contrib = {
+            "carbohydrates": grag_result["carbohydrates"],
+            "protein": grag_result["protein"],
+            "fat": grag_result["fat"],
+            "calories": grag_result["calories"],
+        } if grag_result["found"] else None
 
         results.append({
             "meal": meal,
             "actual": item,
-            "predicted": pred,
+            "grag_lookup": grag_contrib,
+            "llm_raw_prediction": llm_pred,
+            "final_fused": final,
             "absolute_error": abs_err,
             "sample_accuracy_pct": round(sample_acc, 2),
-            "raw_output": raw_text
+            "source": source_label,
+            "llm_raw_output": raw_text
         })
 
     n = len(BENCHMARK_DATA)
@@ -194,7 +254,7 @@ def main():
     mae_summary = {k: round(v / count, 2) for k, v in total_mae.items()}
     avg_accuracy = round(total_acc / count, 2)
 
-    print("-" * 96)
+    print("-" * 110)
     print("\n" + "=" * 80)
     print("ACCURACY SUMMARY")
     print("=" * 80)
@@ -204,11 +264,13 @@ def main():
     print(f"  Carbohydrates      : {mae_summary['carb']} g")
     print(f"  Protein            : {mae_summary['protein']} g")
     print(f"  Fat                : {mae_summary['fat']} g")
-    print(f"  Calories           : {mae_summary['energy']} kcal")
-    print(f"Overall Model Accuracy: {avg_accuracy}%")
+    print(f"  Calories           : {mae_summary['energy']} kcal  (Atwater enforced)")
+    print(f"Overall Accuracy     : {avg_accuracy}%")
     print("=" * 80)
 
     summary_data = {
+        "pipeline": f"{GRAG_WEIGHT} GRAG + {LLM_WEIGHT} LLM + Atwater energy correction",
+        "decoding": "deterministic greedy (do_sample=False)",
         "samples_tested": n,
         "valid_predictions": valid_predictions,
         "mean_absolute_error": mae_summary,
